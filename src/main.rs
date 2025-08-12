@@ -7,6 +7,8 @@ use panic_halt as _;
 use embedded_hal::delay::DelayNs;
 use embedded_hal::digital::OutputPin;
 
+mod dht20; // DHT20 ドライバ
+
 // UART で送信するためのユーティリティ: 0-100 を 10 進 ASCII に変換
 fn u8_to_decimal_buf(n: u8, buf: &mut [u8; 4]) -> &[u8] {
     // 最大 "100" + 終端不要 (戻り値で長さ制御)
@@ -45,7 +47,7 @@ fn main() -> ! {
     )
     .unwrap();
 
-    let mut timer = hal::timer::Timer::new(pac.TIMER, &mut pac.RESETS, &clocks);
+    let timer = hal::timer::Timer::new(pac.TIMER, &mut pac.RESETS, &clocks);
     let sio = hal::Sio::new(pac.SIO);
     let pins = hal::gpio::Pins::new(
         pac.IO_BANK0,
@@ -74,20 +76,52 @@ fn main() -> ! {
         .enable(uart_config, clocks.peripheral_clock.freq())
         .unwrap();
 
-    let mut count: u8 = 0;
-    let mut buf = [0u8; 4];
+    let mut count: u8 = 0;               // UARTで送るカウンタ
+    let mut buf = [0u8; 4];              // カウンタ表示用バッファ
+    let mut loop_ticks: u8 = 0;          // 500ms 単位カウンタ (6で3秒)
+    let mut _last_rh: f32 = 0.0;         // 最新湿度 (現状未使用)
+    let mut _last_temp: f32 = 0.0;       // 最新温度 (現状未使用)
+
+    // ==== DHT20 I2C 初期化 (I2C0 SDA=GP4, SCL=GP5) ====
+    use hal::gpio::FunctionI2C;
+    let sda = pins.gpio4.into_function::<FunctionI2C>();
+    let scl = pins.gpio5.into_function::<FunctionI2C>();
+    // RateExtU32 は既に UART 設定時にインポート済み
+    let i2c = hal::i2c::I2C::new_controller(
+        pac.I2C0,
+        sda,
+        scl,
+        100_000u32.Hz(), // 100kHz
+        &mut pac.RESETS,
+        clocks.system_clock.freq(),
+    );
+
+    let mut dht = dht20::Dht20::new(i2c, timer);
+    let _ = dht.init(); // 初期化失敗は無視して続行
+
     loop {
-        // LED をトグルして送信タイミング確認
+        // LED トグル (送信直前 100ms 消灯)
         let _ = led.set_low();
-        timer.delay_ms(100);
+        dht.delay_mut().delay_ms(100);
         let _ = led.set_high();
 
+        // UART 送信 (0-100)
         let slice = u8_to_decimal_buf(count, &mut buf);
-    uart.write_full_blocking(slice);
-    uart.write_full_blocking(b"\r\n"); // 行終端 (CRLF)
-
-        // 次の値
+        uart.write_full_blocking(slice);
+        uart.write_full_blocking(b"\r\n");
         count = if count == 100 { 0 } else { count + 1 };
-        timer.delay_ms(400); // 合計 ~500ms 間隔
+
+        // 残り 400ms 待ち (合計 ~500ms 周期)
+        dht.delay_mut().delay_ms(400);
+        loop_ticks = loop_ticks.wrapping_add(1); // 0..=255
+
+        // 3秒毎 (500ms * 6) に計測
+        if loop_ticks % 6 == 0 {
+            if let Ok((rh, t)) = dht.read() {
+                _last_rh = rh;
+                _last_temp = t;
+                // ここで必要なら何かの処理に利用 (現状: 変数保持のみ)
+            }
+        }
     }
 }
