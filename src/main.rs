@@ -79,8 +79,8 @@ fn main() -> ! {
     let mut count: u8 = 0;               // UARTで送るカウンタ
     let mut buf = [0u8; 4];              // カウンタ表示用バッファ
     let mut loop_ticks: u8 = 0;          // 500ms 単位カウンタ (6で3秒)
-    let mut _last_rh: f32 = 0.0;         // 最新湿度 (現状未使用)
-    let mut _last_temp: f32 = 0.0;       // 最新温度 (現状未使用)
+    let mut last_rh: f32 = 0.0;          // 最新湿度（デバッグ確認用）
+    let mut last_temp: f32 = 0.0;        // 最新温度（デバッグ確認用）
 
     // ==== DHT20 I2C 初期化 (I2C0 SDA=GP4, SCL=GP5) ====
     use hal::gpio::FunctionI2C;
@@ -97,7 +97,16 @@ fn main() -> ! {
     );
 
     let mut dht = dht20::Dht20::new(i2c, timer);
-    let _ = dht.init(); // 初期化失敗は無視して続行
+    
+    // 初期化結果をチェック＆デバッグ出力
+    match dht.init() {
+        Ok(_) => {
+            uart.write_full_blocking(b"DHT20 init SUCCESS\r\n");
+        }
+        Err(_) => {
+            uart.write_full_blocking(b"DHT20 init FAILED - check wiring!\r\n");
+        }
+    }
 
     loop {
         // LED トグル (送信直前 100ms 消灯)
@@ -115,12 +124,43 @@ fn main() -> ! {
         dht.delay_mut().delay_ms(400);
         loop_ticks = loop_ticks.wrapping_add(1); // 0..=255
 
-        // 3秒毎 (500ms * 6) に計測
+        // 3秒ごと（6回に1回）に温湿度を読み取り
         if loop_ticks % 6 == 0 {
-            if let Ok((rh, t)) = dht.read() {
-                _last_rh = rh;
-                _last_temp = t;
-                // ここで必要なら何かの処理に利用 (現状: 変数保持のみ)
+            match dht.read() {
+                Ok((rh, t)) => {
+                    last_rh = rh;
+                    last_temp = t;
+                    
+                    // デバッグ出力（簡易版）
+                    uart.write_full_blocking(b"RH=");
+                    // 湿度を整数で表示（簡易）
+                    let rh_int = rh as u32;
+                    if rh_int >= 100 {
+                        uart.write_full_blocking(b"99+");
+                    } else {
+                        let rh_str = u8_to_decimal_buf(rh_int as u8, &mut buf);
+                        uart.write_full_blocking(rh_str);
+                    }
+                    uart.write_full_blocking(b"%  T=");
+                    
+                    // 温度を整数で表示（簡易）
+                    let t_int = t as i32;
+                    if t_int < 0 {
+                        uart.write_full_blocking(b"-");
+                        let t_abs = (-t_int) as u8;
+                        let t_str = u8_to_decimal_buf(t_abs, &mut buf);
+                        uart.write_full_blocking(t_str);
+                    } else if t_int >= 100 {
+                        uart.write_full_blocking(b"99+");
+                    } else {
+                        let t_str = u8_to_decimal_buf(t_int as u8, &mut buf);
+                        uart.write_full_blocking(t_str);
+                    }
+                    uart.write_full_blocking(b"C\r\n");
+                }
+                Err(_) => {
+                    uart.write_full_blocking(b"DHT20 read ERROR - sensor not responding\r\n");
+                }
             }
         }
     }
